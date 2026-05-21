@@ -8,6 +8,7 @@ import random
 import re
 import time
 import unicodedata
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -17,7 +18,7 @@ from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 from google.genai import types
 from google.oauth2 import service_account
-
+from transformers import pipeline
 
 # =========================
 # 1. CONFIGURACION GENERAL
@@ -53,7 +54,12 @@ LOCAL_EMBEDDING_MODEL = _secret_or_env("LOCAL_EMBEDDING_MODEL", "")
 
 MIN_SEMANTIC_SCORE = float(_secret_or_env("MIN_SEMANTIC_SCORE", "0.18") or 0.18)
 MAX_CONTEXT_CHARS = int(_secret_or_env("MAX_CONTEXT_CHARS", "12000") or 12000)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
+logger = logging.getLogger("youtube_agent")
 
 # =========================
 # 2. CLIENTES
@@ -86,8 +92,15 @@ def get_gemini_client() -> genai.Client:
 
 @st.cache_resource(show_spinner=False)
 def get_sentence_transformer_model(model_name: str):
+    @st.cache_resource(show_spinner=False)
+    
+    def get_sentiment_pipeline():
+        return pipeline(
+            "sentimental-analysis",
+            model="cardiffnlp/twitter-roberta-base-sentiment-latest"
+    ) 
     from sentence_transformers import SentenceTransformer
-
+    from sentence_transformers import CrossEncoder
     return SentenceTransformer(model_name)
 
 
@@ -261,12 +274,62 @@ METRIC_LABELS = {
 
 
 def safe_float(value: Any) -> float:
+    def analyze_comment_sentiment(comments:list[str])->dict[str,Any]:
+        if not comments:
+            return{
+                "positivo":0,
+                "negativo":0,
+                "neutral":0,
+                "score_promedio":0
+            }
+    classifier= get_sentiment_pipeline()
+    results=classifier(comments[:50])
+
+    positive=0
+    negative=0
+    neutral=0
+    scores[]
+    
+    for r in results:
+        label=r["label"].ñower()
+        score=float(r["score"])
+        if "positive" in label:
+            positive +=1
+        elif "negative" in label:
+            negative +=1
+        elese:
+            neutral +=1
+        return{
+            "positivo":positive,
+            "negativo":negative,
+            "neutral":neutral,
+            "score_promedio":sum(scores)/len(scores)
+        }
+        socores.append(score)
+    
     try:
         return float(value or 0)
     except Exception:
         return 0.0
 
+def calculate_viral_score(row:dict[str,Any])->float:
+    views = safe_float(row.get("views"))
+    likes = safe_float(row.get("likes"))
+    comments = safe_float(row.get("comentarios"))
+    engagement = safe_float(row.get("engagement"))
+    views_per_day = safe_float(row.get("views_por_dia"))
+    views_per_minute = safe_float(row.get("views_por_minuto"))
 
+    score = (
+        (views * 0.25) +
+        (likes * 0.20) +
+        (comments * 0.20) +
+        (engagement * 100 * 0.15) +
+        (views_per_day * 0.10) +
+        (views_per_minute * 0.10)
+    )
+     return round(score, 2)
+    
 def growth_sort_key(row: dict[str, Any], order_by: str = "views") -> tuple:
     metric = ALLOWED_ORDER_COLUMNS.get(order_by, "views")
     if metric == "fecha_publicacion":
@@ -322,6 +385,7 @@ def add_rank_and_reason(rows: list[dict[str, Any]], order_by: str = "views") -> 
             "para priorizar crecimiento del canal."
         )
         item["metrica_principal"] = item.get(metric)
+        item["viral_score"] = calculate_viral_score(item)
         ranked.append(item)
     return ranked
 
@@ -1092,7 +1156,7 @@ def generate_final_answer(
     history: Optional[list[dict[str, str]]] = None,
     response_mode: str = "normal",
 ) -> str:
-
+logger.info(f"Pregunta recibida: {question}")
     base_personality = """
 Eres un agente conversacional para creadores de contenido de YouTube.
 
@@ -1277,8 +1341,37 @@ def group_best_segments_by_video(results: list[dict[str, Any]], max_per_video: i
         if len(final) >= limit:
             break
     return final
+def rerank_results(
+    query: str,
+    results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
 
+    if not results:
+        return results
 
+    reranker = get_cross_encoder()
+
+    pairs = []
+
+    for row in results:
+
+        text = (
+            str(row.get("titulo_video", "")) + " " +
+            str(row.get("segment_text", ""))
+)
+
+        pairs.append([query, text])
+
+    scores = reranker.predict(pairs)
+
+    for row, score in zip(results, scores):
+        row["rerank_score"] = float(score)
+
+    return sorted(
+        results,
+        key=lambda x: x["rerank_score"],
+        reverse=True
+    )
 # =========================
 # 7. AGENTE RAG
 # =========================
@@ -1483,6 +1576,7 @@ class RAGYouTubeAgent:
             top_k=40,
             min_score=MIN_SEMANTIC_SCORE,
         )
+        results = rerank_results(topic, results)
         ranked = sorted(
             results,
             key=lambda row: (
