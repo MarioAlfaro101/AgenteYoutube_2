@@ -8,9 +8,9 @@ import random
 import re
 import time
 import unicodedata
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
-
 import streamlit as st
 from google import genai
 from google.api_core.exceptions import NotFound
@@ -33,6 +33,12 @@ def _secret_or_env(name: str, default: Optional[str] = None) -> Optional[str]:
         pass
     return os.environ.get(name, default)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger("youtube_agent")
 
 PROJECT_ID = _secret_or_env("PROJECT_ID", "mineria-datos-493000")
 DATASET_ID = _secret_or_env("DATASET_ID", "youtube")
@@ -1244,6 +1250,7 @@ Redacta la respuesta final en español:
     try:
         return gemini_generate(prompt, temperature=0.25)
     except Exception as exc:
+        logger.error(str(exc))
         return fallback_answer_without_gemini(context, exc)
 
 
@@ -1289,7 +1296,9 @@ class RAGYouTubeAgent:
         self.retriever = retriever
 
     def answer(self, question: str, history: Optional[list[dict[str, str]]] = None) -> str:
+        logger.info(f"Pregunta recibida: {question}")
         plan = interpret_question(question, history=history)
+        logger.info(f"Intent detectado: {plan.get('intent')}")
         intent = plan.get("intent", "fallback")
         topic = plan.get("topic") or extract_topic_from_question(question, compact_history(history))
         filters = filters_from_plan(plan)
